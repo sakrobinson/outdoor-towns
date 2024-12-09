@@ -11,12 +11,21 @@
   flex-direction: column;
 }
 
+.app-logo {
+  height: 40px;  /* Reduced from 50px */
+  width: auto;   /* This maintains aspect ratio */
+  margin-right: 20px;
+}
+
 .App-header {
   background-color: #282c34;
   padding: 1rem;
   color: white;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  min-height: 60px;  /* Add this to ensure consistent header height */
 }
-
 .main-content {
   flex: 1;
   display: flex;
