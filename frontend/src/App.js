@@ -33,7 +33,7 @@ function App() {
 
   const handleSearch = (searchTerm) => {
     console.log('Searching for:', searchTerm);
-    // implement search filtering later
+    // TODO: implement search filtering later
   };
 
   if (loading) return <div>Loading locations...</div>;
@@ -42,7 +42,8 @@ function App() {
   return (
     <div className="App">
       <header className="App-header">
-        <h1>OutdoorTowns</h1>
+        <img src="/inout_logo.png" alt="InOut Logo" className="app-logo"  />
+        <h1>In-Town / Outdoors</h1>
         <SearchBar onSearch={handleSearch} />
       </header>
       <div className="main-content">
