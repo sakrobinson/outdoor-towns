@@ -1,142 +1,133 @@
 from .base_agent import BaseAgent
 from typing import Dict, Any, List
 import json
-from schema.database_schema import get_location_template, VALID_ACTIVITIES
+from schema.database_schema import (
+    LOCATIONS_SCHEMA,
+    ACTIVITY_SCORES_SCHEMA,
+    VALID_ACTIVITIES,
+    get_location_template
+)
 
 class ResearchAgent(BaseAgent):
     def __init__(self, anthropic_api_key: str, model: str = "claude-3-5-sonnet-20240620"):
         super().__init__(anthropic_api_key=anthropic_api_key, model=model)
-        self.known_locations: List[str] = []
+        self.known_locations = []
+        self.schema = self._get_schema()
+    
+    def _get_schema(self) -> str:
+        """Get the database schema to ensure research matches required format"""
+        return f"""
+        Database Schema:
+        {LOCATIONS_SCHEMA}
         
+        Activity Scores:
+        {ACTIVITY_SCORES_SCHEMA}
+        
+        Valid Activities:
+        {', '.join(VALID_ACTIVITIES)}
+        """
+    
     @property
     def capabilities(self) -> str:
         return """
-        I can:
-        - Suggest new outdoor towns to add to the database
-        - Research and compile descriptions for locations
-        - Identify primary outdoor activities for locations
-        - Provide information about seasonal activities
-        - Compare different locations
-        
-        I handle queries about discovering new locations, research, and analysis.
+        - Research new locations
+        - Prepare location data for database
+        - Validate location information
         """
-
+    
     def process(self, query: str) -> str:
         """Process research-related queries"""
-        # Add query to history
-        self.add_to_history("user", query)
+        query = query.lower()
         
-        prompt = f"""
-        You are a knowledgeable outdoor recreation expert.
+        if "research" in query:
+            # Extract location name
+            location_name = query.replace("research", "").replace("and add", "").strip()
+            if not location_name:
+                return "Please specify a location to research."
+                
+            try:
+                data = self.prepare_location_data(location_name)
+                formatted_json = json.dumps(data, indent=2)
+                
+                # Store in session state instead of instance variable
+                import streamlit as st
+                st.session_state.pending_location = data
+                
+                return f"""I've researched {location_name}. Here's what I found:\n\n{formatted_json}\n\nWould you like me to add this to the database?"""
+            except Exception as e:
+                return f"Error researching location: {str(e)}"
         
-        {self.get_recent_history()}
-        
-        Current known locations: {', '.join(self.known_locations)}
-        
-        User query: "{query}"
-        
-        If they're asking about suggesting new locations:
-        1. DO NOT suggest any locations already mentioned in the conversation or known locations
-        2. Recommend ONE notable outdoor town that would be a good addition
-        3. Include:
-           - Town name and location
-           - Key outdoor activities
-           - Brief description of why it's notable
-           - Best seasons to visit
-        
-        If they're asking about comparing locations or other research questions:
-        Provide a detailed but concise response.
-        
-        Format your response in a clear, readable way.
-        """
-        
-        response = self.llm.invoke([{"role": "user", "content": prompt}])
-        
-        # Add response to history
-        self.add_to_history("assistant", response.content)
-        
-        # Extract any new locations mentioned in the response
-        # This is a simple implementation - you might want more sophisticated location extraction
-        words = response.content.split()
-        for i, word in enumerate(words):
-            if word in ["in", "at", "near"] and i + 1 < len(words):
-                potential_location = words[i + 1].strip(",.!")
-                if potential_location not in self.known_locations:
-                    self.known_locations.append(potential_location)
-        
-        return response.content
-
-    def suggest_locations(self, existing_locations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Suggest new locations to add"""
-        prompt = f"""
-        You are a knowledgeable outdoor recreation expert. Given this list of existing locations:
-        {existing_locations}
-        
-        Suggest 3 additional notable outdoor towns that should be added to the database.
-        Focus on locations known for multiple outdoor activities.
-        
-        Return your response as a JSON array with objects containing:
-        - name: town name
-        - state: state or province
-        - country: country
-        - primary_activities: list of main outdoor activities
-        """
-        
-        response = self.llm.invoke([{"role": "user", "content": prompt}])
-        return json.loads(response.content)
-
-    def compile_description(self, location_name: str) -> str:
-        """Create a detailed description for a location"""
-        prompt = f"""
-        Create a comprehensive but concise description for {location_name} as an outdoor recreation destination.
-        Focus on:
-        1. Key outdoor activities and attractions
-        2. Accessibility and amenities
-        3. Best seasons to visit
-        4. Any unique features
-        
-        Keep the description under 200 words.
-        """
-        
-        response = self.llm.invoke([{"role": "user", "content": prompt}])
-        return response.content 
-
+        # Check for various forms of add confirmation
+        add_phrases = ["add", "yes", "please add", "add this", "add it"]
+        if any(phrase in query.lower() for phrase in add_phrases):
+            # Check session state instead of instance variable
+            import streamlit as st
+            if "pending_location" in st.session_state:
+                location_data = st.session_state.pending_location
+                # TODO: Add database insertion logic here
+                return f"Added {location_data['name']} to the database."
+            else:
+                return "Please research a location first before trying to add it."
+            
+        return "I can help research locations. Try asking me to 'research [city name]'"
+    
     def prepare_location_data(self, location_name: str) -> Dict[str, Any]:
         """Prepare complete location data for database insertion"""
         template = get_location_template()
         
         prompt = f"""
-        You are a data preparation expert. Your task is to research {location_name} and return ONLY a JSON object.
-        Do not include any other text or explanation.
+        You are a data preparation expert. Research {location_name} and return ONLY a JSON object.
         
-        The JSON must follow this EXACT format:
+        The data MUST match this database schema:
+        {self.schema}
+        
+        Use this template format:
         {json.dumps(template, indent=2)}
 
         CRITICAL REQUIREMENTS:
         1. Return ONLY the JSON object
-        2. All fields must be present exactly as shown
+        2. All fields must match the database schema exactly
         3. Use real coordinates for the town center with 8 decimal places
         4. Score activities from 0 to 100 based on quality and availability
         5. Description should focus on outdoor recreation opportunities
-        
-        Valid activities are: {', '.join(VALID_ACTIVITIES)}
+        6. Only include activities from the Valid Activities list
         """
         
         try:
             response = self.llm.invoke([{"role": "user", "content": prompt}])
             data = json.loads(response.content)
             
-            # Validate against template
-            for key in template.keys():
-                if key not in data:
-                    raise ValueError(f"Missing required field: {key}")
+            # Add response to history
+            self.add_to_history("assistant", json.dumps(data, indent=2))
+            
+            # Validate against schema requirements
+            if not all(key in data for key in template.keys()):
+                raise ValueError(f"Missing required fields. Required: {list(template.keys())}")
             
             # Validate activities
             for activity in data["activities"].keys():
                 if activity not in VALID_ACTIVITIES:
                     raise ValueError(f"Invalid activity: {activity}")
+                if not 0 <= data["activities"][activity] <= 100:
+                    raise ValueError(f"Activity score must be 0-100: {activity}")
+            
+            # Validate coordinates
+            if not isinstance(data["latitude"], (int, float)):
+                raise ValueError("Latitude must be a number")
+            if not isinstance(data["longitude"], (int, float)):
+                raise ValueError("Longitude must be a number")
+            if not (-90 <= data["latitude"] <= 90):
+                raise ValueError("Invalid latitude")
+            if not (-180 <= data["longitude"] <= 180):
+                raise ValueError("Invalid longitude")
             
             return data
             
+        except json.JSONDecodeError as e:
+            error_msg = f"Invalid JSON response from LLM: {str(e)}"
+            self.add_to_history("error", error_msg)
+            raise ValueError(error_msg)
         except Exception as e:
-            raise ValueError(f"Error preparing location data: {str(e)}") 
+            error_msg = f"Error preparing location data: {str(e)}"
+            self.add_to_history("error", error_msg)
+            raise ValueError(error_msg)

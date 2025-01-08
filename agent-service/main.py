@@ -2,6 +2,7 @@ import streamlit as st
 from agents.db_agent import DatabaseAgent
 from agents.research_agent import ResearchAgent
 from agents.base_agent import BaseAgent
+import json
 
 # Initialize agents
 anthropic_api_key = st.secrets["ANTHROPIC_API_KEY"]
@@ -35,8 +36,21 @@ mode = st.sidebar.selectbox(
 
 def route_query(query: str) -> str:
     """Route the query to the appropriate agent"""
-    # Update research agent's known locations before processing
-    research_agent.known_locations = db_agent.get_location_names()
+    query = query.lower()
+    
+    # Direct routing for common patterns
+    if query.startswith("research"):
+        return research_agent.process(query)
+        
+    # Handle confirmation and database addition
+    if any(word in query.lower() for word in ["yes", "add", "confirm"]):
+        if "pending_location" in st.session_state:
+            data = st.session_state.pending_location
+            # Clean up session state
+            del st.session_state.pending_location
+            return db_agent.process(f"add to the database: {json.dumps(data)}")
+        else:
+            return "I'm not sure what you're confirming. Could you be more specific?"
     
     agents = {
         'database': db_agent,

@@ -85,41 +85,126 @@ class DatabaseAgent(BaseAgent):
             cur.close()
             conn.close()
 
+    @property
+    def capabilities(self) -> str:
+        return """
+        - Query database contents
+        - List all locations
+        - Get specific location details
+        - Check if location exists
+        """
+    
     def process(self, query: str) -> str:
-        """Process the query using LLM to generate SQL"""
-        sql_generation_prompt = f"""
-        Given this database schema:
-        {self.schema}
+        """Process database-related queries"""
+        query = query.lower()
         
-        And this user request:
-        "{query}"
+        # Add location to database
+        if "add" in query and "to the database" in query:
+            try:
+                # Extract JSON data from query
+                start = query.find('{')
+                end = query.rfind('}') + 1
+                if start == -1 or end == -1:
+                    return "No valid JSON data found in the query"
+                
+                json_str = query[start:end]
+                location_data = json.loads(json_str)
+                
+                # Insert into database
+                success = self.add_location(location_data)
+                if success:
+                    return f"Successfully added {location_data['name']} to the database!"
+                else:
+                    return "Failed to add location to database"
+            except json.JSONDecodeError:
+                return "Invalid JSON data provided"
+            except Exception as e:
+                return f"Error adding location: {str(e)}"
         
-        Generate a SQL query to fulfill this request. Consider:
-        1. The appropriate SQL operation (SELECT, INSERT, UPDATE, DELETE)
-        2. Necessary table joins
-        3. Proper WHERE clauses
-        4. Data integrity
+        # List all locations
+        if any(phrase in query for phrase in ["what cities", "list all", "show all", "select * from"]):
+            locations = self.get_location_names()
+            if not locations:
+                return "The database is currently empty."
+            return "Current locations in database:\n" + "\n".join(f"• {loc}" for loc in locations)
         
-        Return only the SQL query, no explanation.
-        """
+        # Get specific location details
+        if "what is" in query or "details for" in query or "tell me about" in query:
+            for loc in self.get_location_names():
+                if loc.lower() in query:
+                    return self.get_location_details(loc)
+            return "Location not found in database."
         
-        generated_sql = self.llm.invoke([{"role": "user", "content": sql_generation_prompt}])
-        sql_query = generated_sql.content.strip()
-        
-        results, message = self.execute_query(sql_query)
-        
-        # Have the LLM format the response
-        response_prompt = f"""
-        Given these query results:
-        {json.dumps(results, indent=2, cls=DecimalEncoder)}
-        
-        Format a CONCISE response that lists ONLY the relevant information.
-        No explanations or summaries.
-        No "I can provide" or similar phrases.
-        Just the facts in a clean format.
-        
-        Query: "{query}"
-        """
-        
-        response = self.llm.invoke([{"role": "user", "content": response_prompt}])
-        return response.content 
+        return "I don't understand that database query. Try asking about what cities are included or details about a specific location."
+    
+    def get_location_details(self, location_name: str) -> str:
+        """Get formatted details for a specific location"""
+        conn = psycopg2.connect(**self.db_config)
+        cur = conn.cursor()
+        try:
+            cur.execute("""
+                SELECT name, latitude, longitude, description, activities 
+                FROM locations 
+                WHERE name = %s
+            """, (location_name,))
+            result = cur.fetchone()
+            
+            if not result:
+                return f"No details found for {location_name}"
+            
+            name, lat, lon, desc, activities = result
+            activities_str = "\n".join(
+                f"• {act}: {score}/100" 
+                for act, score in activities.items()
+            )
+            
+            return f"""
+Location: {name}
+Coordinates: {lat}, {lon}
+
+Description:
+{desc}
+
+Activities:
+{activities_str}
+"""
+        finally:
+            cur.close()
+            conn.close() 
+    
+    def add_location(self, data: Dict[str, Any]) -> bool:
+        """Add a new location to the database"""
+        conn = psycopg2.connect(**self.db_config)
+        cur = conn.cursor()
+        try:
+            # Insert into locations table
+            cur.execute("""
+                INSERT INTO locations (name, latitude, longitude, description, activities)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING id
+            """, (
+                data["name"],
+                data["latitude"],
+                data["longitude"],
+                data["description"],
+                json.dumps(data["activities"])
+            ))
+            
+            location_id = cur.fetchone()[0]
+            
+            # Insert activity scores
+            for activity, score in data["activities"].items():
+                cur.execute("""
+                    INSERT INTO activity_scores (location_id, activity_type, score)
+                    VALUES (%s, %s, %s)
+                """, (location_id, activity, score))
+            
+            conn.commit()
+            return True
+            
+        except Exception as e:
+            conn.rollback()
+            raise e
+        finally:
+            cur.close()
+            conn.close() 

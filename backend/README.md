@@ -57,7 +57,7 @@ sudo -u postgres psql outdoor_towns
 #### Basic Queries. Examples:
 `sql`
 -- Get all locations
-SELECT FROM locations;
+SELECT * FROM locations;
 -- Get location with specific activities
 SELECT l., a.activity_type, a.score
 FROM locations l
