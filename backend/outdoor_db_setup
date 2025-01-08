@@ -36,4 +36,3 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO outdoor_admin;
 
 # Exit PostgreSQL
 \q
-AIzaSyC3uckxpey4_ADzrYorRiiZgXlO8GER6rw
