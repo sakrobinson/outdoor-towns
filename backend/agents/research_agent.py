@@ -3,6 +3,19 @@ from typing import Dict, Any
 import json
 
 class ResearchAgent(BaseAgent):
+    @property
+    def capabilities(self) -> str:
+        return """
+        I can:
+        - Suggest new outdoor towns to add to the database
+        - Research and compile descriptions for locations
+        - Identify primary outdoor activities for locations
+        - Provide information about seasonal activities
+        - Compare different locations
+        
+        I handle queries about discovering new locations, research, and analysis.
+        """
+
     async def suggest_locations(self, existing_locations: list) -> list:
         prompt = f"""
         You are a knowledgeable outdoor recreation expert. Given this list of existing locations:

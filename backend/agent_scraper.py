@@ -3,6 +3,7 @@ from agents.db_agent import DatabaseAgent
 from agents.research_agent import ResearchAgent
 from utils.env_loader import load_env_vars, get_api_key
 import asyncio
+from agents.base_agent import BaseAgent
 
 # Load environment variables
 load_env_vars()
@@ -18,8 +19,9 @@ db_config = {
 }
 
 # Initialize agents
-db_agent = DatabaseAgent(api_key, db_config)
-research_agent = ResearchAgent(api_key)
+anthropic_api_key = st.secrets["ANTHROPIC_API_KEY"]  # Get from secrets
+db_agent = DatabaseAgent(anthropic_api_key=anthropic_api_key, db_config=db_config)
+research_agent = ResearchAgent(anthropic_api_key=anthropic_api_key)
 
 # Initialize chat history if not exists
 if "messages" not in st.session_state:
@@ -34,21 +36,43 @@ mode = st.sidebar.selectbox(
     ["Chat Interface", "View Existing", "Add Suggestions"]
 )
 
-async def process_chat_message(message: str) -> str:
-    # Route the message to the appropriate agent based on content
-    if any(keyword in message.lower() for keyword in ["database", "cities", "locations", "towns"]):
-        locations = await db_agent.get_existing_locations()
-        return f"Database Agent: Here are the current locations: {', '.join(locations)}"
+def route_query(query: str) -> str:
+    """Route the query to the appropriate agent"""
+    agents = [db_agent, research_agent]
     
-    elif any(keyword in message.lower() for keyword in ["suggest", "recommend", "new", "research"]):
-        existing = await db_agent.get_existing_locations()
-        suggestions = await research_agent.suggest_locations(existing)
-        return f"Research Agent: Here are some suggestions:\n" + \
-               "\n".join([f"- {s['name']}, {s['state']}: {', '.join(s['primary_activities'])}" 
-                         for s in suggestions])
+    # Ask each agent if they can handle the query
+    capable_agents = []
+    for agent in agents:
+        if agent.can_handle(query):
+            capable_agents.append(agent)
     
+    if not capable_agents:
+        return "I'm sorry, none of our agents are equipped to handle this query."
+    
+    if len(capable_agents) > 1:
+        # Let the LLM decide which agent is best suited
+        selection_prompt = f"""
+        Given this user query: "{query}"
+        
+        Multiple agents can handle this. Their capabilities are:
+        
+        {[f"Agent {i+1}: {agent.capabilities}" for i, agent in enumerate(capable_agents)]}
+        
+        Which agent (1-{len(capable_agents)}) would be best suited to handle this query?
+        Reply with just the number and a brief explanation.
+        """
+        
+        response = base_agent.llm.invoke([{"role": "user", "content": selection_prompt}])
+        selected_agent = capable_agents[int(response.content.split()[0]) - 1]
     else:
-        return "I'm not sure which agent should handle this request. Try asking about database contents or requesting suggestions."
+        selected_agent = capable_agents[0]
+    
+    # Process the query with the selected agent
+    return selected_agent.process(query)
+
+# Update the chat interface
+def process_chat_message(prompt: str) -> str:
+    return route_query(prompt)
 
 async def main():
     if mode == "Chat Interface":
@@ -67,7 +91,7 @@ async def main():
             # Get agent response
             with st.chat_message("assistant"):
                 with st.spinner("Thinking..."):
-                    response = await process_chat_message(prompt)
+                    response = process_chat_message(prompt)
                     st.markdown(response)
                     st.session_state.messages.append({"role": "assistant", "content": response})
 
