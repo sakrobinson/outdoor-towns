@@ -1,68 +1,152 @@
 from .base_agent import BaseAgent
 import psycopg2
 from typing import Dict, Any, List, Tuple
+import json
+from decimal import Decimal
+
+class DecimalEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, Decimal):
+            return float(obj)
+        return super(DecimalEncoder, self).default(obj)
 
 class DatabaseAgent(BaseAgent):
     def __init__(self, anthropic_api_key: str, db_config: dict, model: str = "claude-3-5-sonnet-20240620"):
         super().__init__(anthropic_api_key=anthropic_api_key, model=model)
         self.db_config = db_config
+        self.schema = self._get_schema()
         
-    @property
-    def capabilities(self) -> str:
-        return """
-        I can:
-        - List all locations in the database
-        - Add new locations with their details
-        - Remove locations by ID or name
-        - Update existing location information
-        - Query location details
-        - Manage activity scores for locations
-        
-        I handle queries about existing data, database operations, and data management.
-        """
-    
-    def get_existing_locations(self) -> List[Dict[str, Any]]:
-        """Get all locations with their details"""
+    def get_location_names(self) -> List[str]:
+        """Get just the names of all locations"""
         conn = psycopg2.connect(**self.db_config)
         cur = conn.cursor()
         try:
-            cur.execute("""
-                SELECT id, name, latitude, longitude, description, activities 
-                FROM locations
-                ORDER BY name
-            """)
-            columns = [desc[0] for desc in cur.description]
-            locations = [dict(zip(columns, row)) for row in cur.fetchall()]
-            return locations
+            cur.execute("SELECT DISTINCT name FROM locations ORDER BY name")
+            return [row[0] for row in cur.fetchall()]
         finally:
             cur.close()
             conn.close()
     
+    def _get_schema(self) -> str:
+        """Get the database schema"""
+        conn = psycopg2.connect(**self.db_config)
+        cur = conn.cursor()
+        try:
+            # Get tables and their columns
+            cur.execute("""
+                SELECT 
+                    table_name,
+                    column_name,
+                    data_type,
+                    column_default,
+                    is_nullable
+                FROM information_schema.columns 
+                WHERE table_schema = 'public'
+                ORDER BY table_name, ordinal_position;
+            """)
+            
+            schema = cur.fetchall()
+            
+            # Format schema for LLM
+            schema_str = "Database Schema:\n"
+            current_table = None
+            
+            for table, column, data_type, default, nullable in schema:
+                if table != current_table:
+                    schema_str += f"\nTable: {table}\n"
+                    current_table = table
+                
+                schema_str += f"- {column} ({data_type})"
+                if default:
+                    schema_str += f" DEFAULT {default}"
+                if nullable == 'NO':
+                    schema_str += " NOT NULL"
+                schema_str += "\n"
+            
+            return schema_str
+        finally:
+            cur.close()
+            conn.close()
+
+    def execute_query(self, query: str) -> Tuple[List[Dict[str, Any]], str]:
+        """Execute a query and return results and message"""
+        conn = psycopg2.connect(**self.db_config)
+        cur = conn.cursor()
+        try:
+            # First, have the LLM verify the query is safe
+            safety_prompt = f"""
+            Analyze this SQL query for safety:
+            {query}
+            
+            Check for:
+            1. Potential SQL injection
+            2. Destructive operations (verify they're intended)
+            3. Performance issues with large datasets
+            
+            Reply with either:
+            SAFE: <explanation>
+            or
+            UNSAFE: <explanation>
+            """
+            
+            safety_check = self.llm.invoke([{"role": "user", "content": safety_prompt}])
+            if safety_check.content.startswith("UNSAFE"):
+                return [], f"Query rejected: {safety_check.content}"
+            
+            cur.execute(query)
+            
+            # Handle different query types
+            if cur.description:  # SELECT query
+                columns = [desc[0] for desc in cur.description]
+                results = [dict(zip(columns, row)) for row in cur.fetchall()]
+            else:  # INSERT, UPDATE, DELETE
+                results = []
+                
+            conn.commit()
+            return results, "Query executed successfully"
+            
+        except psycopg2.Error as e:
+            conn.rollback()
+            return [], f"Database error: {str(e)}"
+        finally:
+            cur.close()
+            conn.close()
+
     def process(self, query: str) -> str:
-        """Process the query and return a response"""
-        # Use the LLM to determine what operation is needed
-        operation_prompt = f"""
-        Given this user query: "{query}"
+        """Process the query using LLM to generate SQL"""
+        sql_generation_prompt = f"""
+        Given this database schema:
+        {self.schema}
         
-        Determine what database operation is needed. Options are:
-        1. list_locations (show all locations)
-        2. get_location_details (show details for a specific location)
-        3. add_location (add a new location)
-        4. remove_location (remove a location)
+        And this user request:
+        "{query}"
         
-        Return just the operation name.
+        Generate a SQL query to fulfill this request. Consider:
+        1. The appropriate SQL operation (SELECT, INSERT, UPDATE, DELETE)
+        2. Necessary table joins
+        3. Proper WHERE clauses
+        4. Data integrity
+        
+        Return only the SQL query, no explanation.
         """
         
-        operation = self.llm.invoke([{"role": "user", "content": operation_prompt}])
-        operation_type = operation.content.strip().lower()
+        generated_sql = self.llm.invoke([{"role": "user", "content": sql_generation_prompt}])
+        sql_query = generated_sql.content.strip()
         
-        if operation_type == 'list_locations':
-            locations = self.get_existing_locations()
-            if not locations:
-                return "The database is currently empty."
-            
-            location_list = "\n".join([f"- {loc['name']}" for loc in locations])
-            return f"Here are the locations in the database:\n{location_list}"
-            
-        # Add other operations as needed
-        return f"Operation {operation_type} not yet implemented" 
+        results, message = self.execute_query(sql_query)
+        
+        # Have the LLM format the response
+        response_prompt = f"""
+        Given these query results:
+        {json.dumps(results, indent=2, cls=DecimalEncoder)}
+        
+        Format a CONCISE response that lists ONLY the relevant information.
+        No explanations or summaries.
+        No "I can provide" or similar phrases.
+        Just the facts in a clean format.
+        
+        Query: "{query}"
+        """
+        
+        response = self.llm.invoke([{"role": "user", "content": response_prompt}])
+        return response.content 
