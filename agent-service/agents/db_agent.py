@@ -94,9 +94,44 @@ class DatabaseAgent(BaseAgent):
         - Check if location exists
         """
     
+    def _normalize_location_name(self, name: str) -> str:
+        """Normalize location name for comparison"""
+        return name.lower().replace(',', '').strip()
+    
+    def _find_matching_location(self, search_name: str) -> str:
+        """Find the exact location name from a search term"""
+        search_normalized = self._normalize_location_name(search_name)
+        locations = self.get_location_names()
+        
+        for loc in locations:
+            if self._normalize_location_name(loc) == search_normalized:
+                return loc  # Return the original casing
+            
+        # Try partial matches if no exact match
+        for loc in locations:
+            if search_normalized in self._normalize_location_name(loc):
+                return loc
+        
+        return None
+
     def process(self, query: str) -> str:
         """Process database-related queries"""
         query = query.lower()
+        
+        # Handle delete/remove requests
+        if any(cmd in query for cmd in ["delete", "remove"]):
+            location_name = query.replace("delete", "").replace("remove", "").strip()
+            try:
+                exact_name = self._find_matching_location(location_name)
+                if not exact_name:
+                    return f"Location '{location_name}' not found in database. Available locations:\n" + "\n".join(f"• {loc}" for loc in self.get_location_names())
+                
+                if self.delete_location(exact_name):
+                    return f"Successfully deleted {exact_name} from the database."
+                else:
+                    return f"Error deleting {exact_name}. Please try again."
+            except Exception as e:
+                return f"Error deleting location: {str(e)}"
         
         # Add location to database
         if "add" in query and "to the database" in query:
@@ -201,6 +236,34 @@ Activities:
             
             conn.commit()
             return True
+            
+        except Exception as e:
+            conn.rollback()
+            raise e
+        finally:
+            cur.close()
+            conn.close() 
+    
+    def delete_location(self, location_name: str) -> bool:
+        """Delete a location from the database"""
+        conn = psycopg2.connect(**self.db_config)
+        cur = conn.cursor()
+        try:
+            # Find the exact location name
+            exact_name = self._find_matching_location(location_name)
+            if not exact_name:
+                return False
+            
+            # Delete from locations table (will cascade to activity_scores)
+            cur.execute("""
+                DELETE FROM locations
+                WHERE LOWER(name) = LOWER(%s)
+                RETURNING id
+            """, (exact_name,))
+            
+            deleted = cur.fetchone() is not None
+            conn.commit()
+            return deleted
             
         except Exception as e:
             conn.rollback()

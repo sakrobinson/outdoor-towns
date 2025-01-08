@@ -9,10 +9,11 @@ from schema.database_schema import (
 )
 
 class ResearchAgent(BaseAgent):
-    def __init__(self, anthropic_api_key: str, model: str = "claude-3-5-sonnet-20240620"):
+    def __init__(self, anthropic_api_key: str, db_agent=None, model: str = "claude-3-5-sonnet-20240620"):
         super().__init__(anthropic_api_key=anthropic_api_key, model=model)
         self.known_locations = []
         self.schema = self._get_schema()
+        self.db_agent = db_agent  # Store reference to database agent
     
     def _get_schema(self) -> str:
         """Get the database schema to ensure research matches required format"""
@@ -33,23 +34,133 @@ class ResearchAgent(BaseAgent):
         - Research new locations
         - Prepare location data for database
         - Validate location information
+        - Suggest new locations to add
         """
     
+    @property
+    def available_commands(self) -> str:
+        return """
+        Available Commands:
+        1. research [city, state]
+           Example: research Bend, Oregon
+        
+        2. suggest location
+           Example: suggest location
+           Aliases: what city should I add, recommend location
+        
+        3. show locations
+           Example: show locations
+           Aliases: list cities, what cities are included
+        
+        4. help
+           Show this command list
+        """
+    
+    def interpret_intent(self, query: str) -> tuple[str, str]:
+        """Convert natural language to command and parameters"""
+        prompt = f"""
+        Convert this user query into one of our supported commands:
+        "{query}"
+        
+        Available commands:
+        1. research [city] - Research a specific city
+        2. suggest - Suggest a new location
+        3. show - Show current locations
+        4. help - Show available commands
+        
+        Return ONLY the command and any parameters in this format:
+        command: parameter
+        
+        Examples:
+        "what cities do we have?" -> "show:"
+        "tell me about Boulder" -> "research: Boulder, Colorado"
+        "what should we add next?" -> "suggest:"
+        "how do I use this?" -> "help:"
+        """
+        
+        response = self.llm.invoke([{"role": "user", "content": prompt}])
+        result = response.content.strip().split(":", 1)
+        command = result[0].strip().lower()
+        parameter = result[1].strip() if len(result) > 1 else ""
+        return command, parameter
+
+    def suggest_next_location(self) -> Dict[str, Any]:
+        """Suggest a new location that isn't in the known_locations list"""
+        prompt = f"""
+        You are a location recommendation expert. Suggest ONE outdoor recreation destination that is NOT in this list:
+        {', '.join(self.known_locations)}
+        
+        Consider:
+        1. Diverse geographic distribution
+        2. Strong outdoor recreation opportunities
+        3. Different types of activities
+        4. Year-round accessibility
+        
+        Return ONLY the name in "City, State" format.
+        """
+        
+        try:
+            response = self.llm.invoke([{"role": "user", "content": prompt}])
+            suggested_location = response.content.strip()
+            return suggested_location
+        except Exception as e:
+            raise ValueError(f"Error suggesting location: {str(e)}")
+
     def process(self, query: str) -> str:
         """Process research-related queries"""
         query = query.lower()
         
-        if "research" in query:
-            # Extract location name
-            location_name = query.replace("research", "").replace("and add", "").strip()
+        # Show help if requested
+        if query in ["help", "commands", "how does this work", "what can you do"]:
+            return self.available_commands
+        
+        # Interpret natural language into command
+        command, parameter = self.interpret_intent(query)
+        
+        # Handle commands
+        if command == "help":
+            return self.available_commands
+            
+        elif command == "show":
+            try:
+                self.known_locations = self.db_agent.get_location_names()
+                return f"Current locations ({len(self.known_locations)}):\n" + "\n".join(f"• {loc}" for loc in self.known_locations)
+            except Exception as e:
+                return f"Error retrieving locations: {str(e)}"
+            
+        elif command == "suggest":
+            # Update known locations from DB first
+            try:
+                self.known_locations = self.db_agent.get_location_names()
+            except:
+                pass  # Continue with existing known_locations if DB call fails
+                
+            try:
+                suggested_location = self.suggest_next_location()
+                return f"Based on the current database of {len(self.known_locations)} locations, I suggest researching {suggested_location}. Would you like me to research this location?"
+            except Exception as e:
+                return f"Error suggesting location: {str(e)}"
+            
+        elif command == "research":
+            location_name = parameter if parameter else query.replace("research", "").replace("and add", "").strip()
             if not location_name:
                 return "Please specify a location to research."
+            
+            # Update known locations from DB first
+            try:
+                self.known_locations = self.db_agent.get_location_names()
+            except:
+                pass
+            
+            # Check if location is already in database
+            if location_name.lower() in [loc.lower() for loc in self.known_locations]:
+                return f"{location_name} is already in the database. Would you like me to suggest a different location?"
                 
             try:
                 data = self.prepare_location_data(location_name)
                 formatted_json = json.dumps(data, indent=2)
                 
-                # Store in session state instead of instance variable
+                # Store in session state
                 import streamlit as st
                 st.session_state.pending_location = data
                 
@@ -57,19 +168,16 @@ class ResearchAgent(BaseAgent):
             except Exception as e:
                 return f"Error researching location: {str(e)}"
         
-        # Check for various forms of add confirmation
-        add_phrases = ["add", "yes", "please add", "add this", "add it"]
-        if any(phrase in query.lower() for phrase in add_phrases):
-            # Check session state instead of instance variable
+        # Handle confirmation responses
+        if any(word in query for word in ["yes", "sure", "okay", "add", "confirm"]):
             import streamlit as st
             if "pending_location" in st.session_state:
                 location_data = st.session_state.pending_location
-                # TODO: Add database insertion logic here
                 return f"Added {location_data['name']} to the database."
             else:
-                return "Please research a location first before trying to add it."
-            
-        return "I can help research locations. Try asking me to 'research [city name]'"
+                return "No pending location to add. Try researching a location first."
+        
+        return "I don't understand that command. Type 'help' to see available commands."
     
     def prepare_location_data(self, location_name: str) -> Dict[str, Any]:
         """Prepare complete location data for database insertion"""

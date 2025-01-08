@@ -17,9 +17,15 @@ db_config = {
 # Initialize agents with shared knowledge
 base_agent = BaseAgent(anthropic_api_key=anthropic_api_key)
 db_agent = DatabaseAgent(anthropic_api_key=anthropic_api_key, db_config=db_config)
-research_agent = ResearchAgent(anthropic_api_key=anthropic_api_key)
+research_agent = ResearchAgent(anthropic_api_key=anthropic_api_key, db_agent=db_agent)
 
-# Update known locations
+# Define available agents
+agents = {
+    'database': db_agent,
+    'research': research_agent
+}
+
+# Initialize known locations
 research_agent.known_locations = db_agent.get_location_names()
 
 # Initialize chat history if not exists
@@ -38,25 +44,66 @@ def route_query(query: str) -> str:
     """Route the query to the appropriate agent"""
     query = query.lower()
     
-    # Direct routing for common patterns
-    if query.startswith("research"):
+    # Database queries
+    db_phrases = ["what cities", "list all", "show all", "in the database", "locations", "cities included"]
+    if any(phrase in query for phrase in db_phrases):
+        return db_agent.process(query)
+    
+    # Handle update/replace requests
+    replace_phrases = ["replace", "update", "redo", "refresh"]
+    if any(phrase in query for phrase in replace_phrases):
+        # Extract location name
+        location = query
+        for phrase in replace_phrases + ["entry", "with", "new", "research"]:
+            location = location.replace(phrase, "")
+        location = location.strip()
+        
+        # If no location specified, check if there's a pending operation
+        if not location and "last_location" in st.session_state:
+            location = st.session_state.last_location
+        
+        if location:
+            # Store for potential follow-up
+            st.session_state.last_location = location
+            
+            # First delete the existing entry
+            delete_result = db_agent.process(f"delete {location}")
+            if "not found" in delete_result.lower() or "error" in delete_result.lower():
+                return delete_result
+                
+            # Then research and add as new
+            return research_agent.process(f"research {location}")
+            
+        return "Please specify which location to replace/update."
+    
+    # Direct routing for research patterns
+    if query.startswith("research") or "research" in query:
+        # Store the location being researched
+        location = query.replace("research", "").strip()
+        if location:
+            st.session_state.last_location = location
         return research_agent.process(query)
         
     # Handle confirmation and database addition
     if any(word in query.lower() for word in ["yes", "add", "confirm"]):
         if "pending_location" in st.session_state:
             data = st.session_state.pending_location
-            # Clean up session state
+            # Clean up session state after use
             del st.session_state.pending_location
             return db_agent.process(f"add to the database: {json.dumps(data)}")
         else:
-            return "I'm not sure what you're confirming. Could you be more specific?"
+            return research_agent.process(query)  # Let research agent handle suggestions
     
-    agents = {
-        'database': db_agent,
-        'research': research_agent
-    }
+    # Handle delete/remove requests
+    if any(cmd in query for cmd in ["delete", "remove"]):
+        return db_agent.process(query)
     
+    # Route to research agent for suggestions
+    suggestion_phrases = ["what city should", "what town should", "suggest", "recommendation"]
+    if any(phrase in query for phrase in suggestion_phrases):
+        return research_agent.process(query)
+    
+    # Default routing through LLM
     routing_prompt = f"""
     Given this user query: "{query}"
     
@@ -73,7 +120,7 @@ def route_query(query: str) -> str:
     selected_agent = response.content.strip().lower()
     
     if selected_agent not in agents:
-        return f"I'm sorry, I couldn't determine which agent should handle: '{query}'"
+        return f"I'm sorry, I couldn't determine how to handle: '{query}'. Try asking about cities in the database or researching a specific location."
     
     return agents[selected_agent].process(query)
 
