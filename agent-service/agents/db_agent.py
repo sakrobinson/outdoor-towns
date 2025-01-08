@@ -3,6 +3,7 @@ import psycopg2
 from typing import Dict, Any, List, Tuple
 import json
 from decimal import Decimal
+from schema.database_schema import LOCATIONS_SCHEMA, ACTIVITY_SCORES_SCHEMA, VALID_ACTIVITIES
 
 class DecimalEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -29,44 +30,16 @@ class DatabaseAgent(BaseAgent):
     
     def _get_schema(self) -> str:
         """Get the database schema"""
-        conn = psycopg2.connect(**self.db_config)
-        cur = conn.cursor()
-        try:
-            # Get tables and their columns
-            cur.execute("""
-                SELECT 
-                    table_name,
-                    column_name,
-                    data_type,
-                    column_default,
-                    is_nullable
-                FROM information_schema.columns 
-                WHERE table_schema = 'public'
-                ORDER BY table_name, ordinal_position;
-            """)
-            
-            schema = cur.fetchall()
-            
-            # Format schema for LLM
-            schema_str = "Database Schema:\n"
-            current_table = None
-            
-            for table, column, data_type, default, nullable in schema:
-                if table != current_table:
-                    schema_str += f"\nTable: {table}\n"
-                    current_table = table
-                
-                schema_str += f"- {column} ({data_type})"
-                if default:
-                    schema_str += f" DEFAULT {default}"
-                if nullable == 'NO':
-                    schema_str += " NOT NULL"
-                schema_str += "\n"
-            
-            return schema_str
-        finally:
-            cur.close()
-            conn.close()
+        return f"""
+        Locations Table:
+        {LOCATIONS_SCHEMA}
+        
+        Activity Scores Table:
+        {ACTIVITY_SCORES_SCHEMA}
+        
+        Valid Activities:
+        {', '.join(VALID_ACTIVITIES)}
+        """
 
     def execute_query(self, query: str) -> Tuple[List[Dict[str, Any]], str]:
         """Execute a query and return results and message"""

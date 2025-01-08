@@ -1,6 +1,7 @@
 from .base_agent import BaseAgent
 from typing import Dict, Any, List
 import json
+from schema.database_schema import get_location_template, VALID_ACTIVITIES
 
 class ResearchAgent(BaseAgent):
     def __init__(self, anthropic_api_key: str, model: str = "claude-3-5-sonnet-20240620"):
@@ -99,3 +100,43 @@ class ResearchAgent(BaseAgent):
         
         response = self.llm.invoke([{"role": "user", "content": prompt}])
         return response.content 
+
+    def prepare_location_data(self, location_name: str) -> Dict[str, Any]:
+        """Prepare complete location data for database insertion"""
+        template = get_location_template()
+        
+        prompt = f"""
+        You are a data preparation expert. Your task is to research {location_name} and return ONLY a JSON object.
+        Do not include any other text or explanation.
+        
+        The JSON must follow this EXACT format:
+        {json.dumps(template, indent=2)}
+
+        CRITICAL REQUIREMENTS:
+        1. Return ONLY the JSON object
+        2. All fields must be present exactly as shown
+        3. Use real coordinates for the town center with 8 decimal places
+        4. Score activities from 0 to 100 based on quality and availability
+        5. Description should focus on outdoor recreation opportunities
+        
+        Valid activities are: {', '.join(VALID_ACTIVITIES)}
+        """
+        
+        try:
+            response = self.llm.invoke([{"role": "user", "content": prompt}])
+            data = json.loads(response.content)
+            
+            # Validate against template
+            for key in template.keys():
+                if key not in data:
+                    raise ValueError(f"Missing required field: {key}")
+            
+            # Validate activities
+            for activity in data["activities"].keys():
+                if activity not in VALID_ACTIVITIES:
+                    raise ValueError(f"Invalid activity: {activity}")
+            
+            return data
+            
+        except Exception as e:
+            raise ValueError(f"Error preparing location data: {str(e)}") 
